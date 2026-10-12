@@ -1,0 +1,17 @@
+# MATLAB 临时和备份文件
+*.asv
+*.m~
+
+# 运行日志和生成结果
+*.log
+logs/
+outputs/
+
+# 本地凭证配置
+.env
+.env.*
+!.env.example
+
+# 系统临时文件
+Thumbs.db
+.DS_Store
