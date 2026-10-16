@@ -1,3 +1,5 @@
+% 历史直接写硬件脚本，仅保留参考；当前共享总线未完成接入核实。
+error('lab:LegacyHardwareDisabled','历史直接控阀入口已停用；请先完成统一设备表与只读验证。');
 clc;
 clear;
 close all;

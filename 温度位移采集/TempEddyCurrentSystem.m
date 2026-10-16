@@ -1,3 +1,4 @@
+% 历史17通道参考类；不属于当前维护入口，真实连接已停用。
 % 温度和电涡流测量系统
 % 作者：Claude
 % 日期：2026-10-07
@@ -73,27 +74,11 @@ classdef TempEddyCurrentSystem < handle
         end
         
         function success = connectModbus(obj)
-            % 连接Modbus RTU设备
-            try
-                % 清除已存在的串口对象
-                delete(instrfind('Port', obj.serialPort));
-                
-                % 创建Modbus RTU对象
-                obj.modbusObj = modbus('serialrtu', obj.serialPort, ...
-                    'BaudRate', obj.baudRate, ...
-                    'DataBits', 8, ...
-                    'Parity', 'none', ...
-                    'StopBits', 1, ...
-                    'Timeout', 2);
-                
-                fprintf('Modbus RTU连接成功 - 端口: %s\n', obj.serialPort);
-                success = true;
-            catch ME
-                fprintf('Modbus连接失败: %s\n', ME.message);
-                success = false;
-            end
+            % Historical 17-channel class: never open the current shared bus.
+            success=false;
+            warning('lab:LegacyHardwareDisabled','17路历史类的硬件连接已停用；main_measurement启动18路统一模拟系统。');
         end
-        
+
         function temps = readTemperatures(obj)
             % 读取所有温度传感器数据
             temps = zeros(1, 17);  % 17路温度

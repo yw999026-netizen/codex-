@@ -1,4 +1,4 @@
-function ThermalError_18T_3Probe_V3()
+function ThermalError_18T_3Probe_V3(acquisitionMode)
 % ========================================================================
 % 龙门机床 18路温度 + 三电涡流 XYZ热误差采集系统 V3
 %
@@ -9,21 +9,22 @@ function ThermalError_18T_3Probe_V3()
 %
 % 1. 18路温度连续采集
 % 2. 三路电涡流位移连续采集
-% 3. 固定2 s采样周期
-% 4. 时间严格记录为：
-%
-%       0, 2, 4, 6, 8, ...
+% 3. 计划2 s采样周期（FixedSpacing / BusyMode=drop）
+% 4. 时间记录为实际单调经过秒数和UTC，不假定严格2 s或无丢失
 %
 % 5. 冷态零点测量
 % 6. 固定检测位热误差测量
 % 7. 5 s稳定等待
-% 8. 20 s测量窗口，共10个2 s采样点
+% 8. 稳定期后20 s实际测量窗口；点数取决于实际轮询，不补采失败窗口
 % 9. 三探头XYZ标定矩阵转换
 % 10. ±100 μm有效范围检查
 % 11. ±90~±100 μm边界预警
 % 12. 连续数据、建模样本分别保存
-% 13. Excel全部中文
-% 14. COM连接失败自动进入离线模拟模式
+% 13. 保留中文工作表和旧数值列；新增审计列使用明确字段名
+% 14. 默认显式模拟；真实设备配置未经核验，真实模式在打开串口前拒绝
+% 15. 每窗需重新确认：主轴停止、同向返回固定点、独立角度复位
+% 16. 连续行、窗口、事件、样本均保留模式/实际时间/质量/实验和基准ID
+% 兼容列“时间/s”“实验时间/s”现表示实际时间；新增ElapsedSec/UTC列。
 %
 % ========================================================================
 % 实验流程
@@ -38,7 +39,7 @@ function ThermalError_18T_3Probe_V3()
 %          ↓
 %     自动稳定5 s
 %          ↓
-%     自动采10个点
+%     在20 s实际窗口内至少取得10个有效点（不足则无效）
 %          ↓
 %     建立本轮实验冷态基准
 %
@@ -53,7 +54,7 @@ function ThermalError_18T_3Probe_V3()
 %          ↓
 %     自动等待5 s
 %          ↓
-%     自动采10个点（2 s/点）
+%     在20 s实际窗口内至少取得10个有效点（不足则无效）
 %          ↓
 %     18温度平均
 %          ↓
@@ -68,6 +69,12 @@ function ThermalError_18T_3Probe_V3()
 % ========================================================================
 
 clc;
+if nargin<1, acquisitionMode='simulation'; end
+% Protocol guard must precede serial construction and serial cleanup alike.
+if ~strcmp(acquisitionMode,'simulation')
+    error('te:UnverifiedConfiguration', ...
+        '真实采集已阻止：全局从站地址、寄存器约定与缩放未经现场核验。请显式选择 simulation。');
+end
 
 %% ========================================================================
 % 1. 用户设置
@@ -95,33 +102,13 @@ settleTimeSec = 5;
 measurementWindowSec = 20;
 
 
-% 固定10个点
+% 有效窗口至少10个点；实际20 s截止，不足点数记为无效
 measurementSamples = ...
     measurementWindowSec / sampleIntervalSec;
 
 
-% ---------------- 是否强制使用离线模式 ----------------
-%
-% false：
-%   先尝试真实设备；
-%   连接失败自动模拟。
-%
-% true：
-%   完全不连接设备，直接模拟。
-%
-
-forceOfflineMode = false;
-
-
-% COM失败是否自动模拟
-
-autoFallbackOffline = true;
-
-
-% ---------------- 连续读取失败次数 ----------------
-
-maxReadErrors = 5;
-
+% 模式只能在构造时显式选择：ThermalError_18T_3Probe_V3('simulation')。
+% 本修订版尚未完成现场通信核验，任何 real 选择均在接触串口前报错。
 
 % ---------------- GUI显示最大点数 ----------------
 
@@ -215,7 +202,7 @@ tempScale = 0.1;
 % 4. 三个电涡流仪表
 % ========================================================================
 %
-% 当前：
+% 以下为历史候选配置，尚未完成现场核验，真实模式已禁止：
 %
 % Probe1：地址5
 % Probe2：地址6
@@ -251,84 +238,8 @@ numProbes = 3;
 % 5. 模式初始化
 % ========================================================================
 
-m = [];
-
-simulateMode = forceOfflineMode;
-
-
-if forceOfflineMode
-
-    fprintf('\n=============================================\n');
-    fprintf('当前设置：强制离线模拟模式\n');
-    fprintf('不会尝试连接COM端口\n');
-    fprintf('=============================================\n');
-
-else
-
-    %% 清理旧串口
-
-    try
-        delete(instrfindall);
-    catch
-    end
-
-
-    %% 尝试Modbus
-
-    try
-
-        fprintf('\n正在连接 %s ...\n', comPort);
-
-
-        m = modbus( ...
-            'serialrtu', ...
-            comPort, ...
-            'BaudRate', baudRate, ...
-            'DataBits', 8, ...
-            'StopBits', 1, ...
-            'Parity', 'none');
-
-
-        m.Timeout = 2;
-
-
-        simulateMode = false;
-
-
-        fprintf('✅ Modbus连接成功。\n');
-
-        fprintf('温度地址：1、2、3\n');
-
-        fprintf('电涡流地址：%d、%d、%d\n', ...
-            probeSensors(1).id, ...
-            probeSensors(2).id, ...
-            probeSensors(3).id);
-
-
-    catch ME
-
-        if autoFallbackOffline
-
-            fprintf('\n⚠️ 真实设备连接失败：\n');
-            fprintf('%s\n', ME.message);
-
-            fprintf('\n自动进入离线模拟模式。\n');
-
-            m = [];
-
-            simulateMode = true;
-
-        else
-
-            error('Modbus连接失败：%s', ...
-                ME.message);
-
-        end
-
-    end
-
-end
-
+m = []; % historical read adapter below is unreachable until separately commissioned
+simulateMode = true; % fixed by the explicit construction guard, never changed on errors
 
 %% ========================================================================
 % 6. 三探头XYZ系统标定矩阵
@@ -362,10 +273,8 @@ calibrationFile = ...
 
 calibrationEnabled = false;
 
-calibrationIsDemo = false;
 
-
-C_xyz_from_probe = eye(3);
+C_xyz_from_probe = nan(3); % unavailable calibration stays unavailable; never enable demo on error
 
 
 if exist(calibrationFile,'file')
@@ -381,7 +290,8 @@ if exist(calibrationFile,'file')
                 'C_xyz_from_probe') && ...
                 isequal( ...
                 size(calData.C_xyz_from_probe), ...
-                [3 3])
+                [3 3]) && ...
+                all(isfinite(calData.C_xyz_from_probe(:)))
 
 
             C_xyz_from_probe = ...
@@ -389,8 +299,6 @@ if exist(calibrationFile,'file')
 
 
             calibrationEnabled = true;
-
-            calibrationIsDemo = false;
 
 
             fprintf('\n✅ 已加载真实XYZ标定矩阵：\n');
@@ -410,26 +318,12 @@ if exist(calibrationFile,'file')
 end
 
 
-%% 离线模拟采用演示矩阵
-
-if simulateMode && ~calibrationEnabled
-
-    C_xyz_from_probe = [ ...
-         1.000,  0.035, -0.020; ...
-        -0.025,  1.000,  0.030; ...
-         0.018, -0.022,  1.000 ...
-        ];
-
-
-    calibrationEnabled = true;
-
-    calibrationIsDemo = true;
-
-
-    fprintf('\n离线模式使用演示XYZ矩阵。\n');
-
-end
-
+% 无标定时保留NaN XYZ；加载失败不会启用演示矩阵。
+session = te.V3Session(acquisitionMode,C_xyz_from_probe, ...
+    settleTimeSec,measurementWindowSec,probeSafeLimit_um,measurementSamples);
+sessionClock = [];
+sessionSequence = 0;
+sessionSaved = true;
 
 %% ========================================================================
 % 7. 自动清理
@@ -449,7 +343,7 @@ fig = figure( ...
     'NumberTitle', ...
     'off', ...
     'Position', ...
-    [30 20 1580 880], ...
+    [30 20 1580 990], ...
     'CloseRequestFcn', ...
     @closeFigure);
 
@@ -461,7 +355,7 @@ fig = figure( ...
 modeText = uicontrol( ...
     'Parent', fig, ...
     'Style', 'text', ...
-    'Position', [1150 825 380 35], ...
+    'Position', [1150 935 380 35], ...
     'FontSize', 13, ...
     'FontWeight', 'bold');
 
@@ -683,7 +577,7 @@ uicontrol( ...
     'Style', 'text', ...
     'String', ...
     sprintf( ...
-    '连续采样周期：%d s（固定）', ...
+    '计划采样间隔：%d s', ...
     sampleIntervalSec), ...
     'Position', ...
     [1150 785 190 28], ...
@@ -712,7 +606,7 @@ uicontrol( ...
     'Style', 'text', ...
     'String', ...
     sprintf( ...
-    '测量窗口：%d s / %d点', ...
+    '测量窗口：%d s / 约%d点', ...
     measurementWindowSec, ...
     measurementSamples), ...
     'Position', ...
@@ -735,6 +629,20 @@ uicontrol( ...
     'left', ...
     'FontSize',11);
 
+
+% 操作者确认是测量条件，不代表软件控制或核验CNC；每个新窗口重新勾选。
+confirmStopped = uicontrol('Parent',fig,'Style','checkbox', ...
+    'String','确认主轴已停止','Position',[1150 900 370 25], ...
+    'Callback',@confirmationCallback,'Enable','off');
+confirmReturn = uicontrol('Parent',fig,'Style','checkbox', ...
+    'String','确认已按同一方向返回固定检测点','Position',[1150 873 370 25], ...
+    'Callback',@confirmationCallback,'Enable','off');
+confirmAngle = uicontrol('Parent',fig,'Style','checkbox', ...
+    'String','确认已独立完成角度复位','Position',[1150 846 370 25], ...
+    'Callback',@confirmationCallback,'Enable','off');
+btnRecover = uicontrol('Parent',fig,'Style','pushbutton', ...
+    'String','显式恢复故障（保留本轮基准）','Position',[1150 812 370 29], ...
+    'Callback',@recoverCallback,'Enable','off');
 
 %% ========================================================================
 % 14. 操作按钮
@@ -855,9 +763,9 @@ detectPositionText = uicontrol( ...
 tableNames = [ ...
     tempNames, ...
     {'探头1','探头2','探头3'}, ...
-    {'X方向热误差', ...
-     'Y方向热误差', ...
-     'Z方向热误差'} ...
+    {'最近有效窗口X热误差', ...
+     '最近有效窗口Y热误差', ...
+     '最近有效窗口Z热误差'} ...
     ];
 
 
@@ -972,7 +880,7 @@ sampleWindowEnd = [];
 %
 % 0 = 无
 % 1 = 等待5秒稳定
-% 2 = 采集10个正式测量点
+% 2 = 实际20 s窗口内测量；至少10点才可有效
 %
 % ========================================================================
 
@@ -981,20 +889,10 @@ windowMode = 0;
 windowPhase = 0;
 
 
-windowRequestClock = [];
-
-windowTempBuffer = [];
-
-windowProbeBuffer = [];
-
-windowTimeBuffer = [];
-
 
 %% ========================================================================
 % 20. 离线模拟状态
 % ========================================================================
-
-simTick = 0;
 
 
 simTempBase = ...
@@ -1023,214 +921,37 @@ updateModeText();
 % ========================================================================
 
     function startCallback(~,~)
-
-        if collecting
-            return;
+        if collecting, return; end
+        if ~sessionSaved
+            sessionSaved=saveData();
+            if ~sessionSaved, return; end
         end
-
-
-        %% ---------------------------------------------------------------
-        % 清空本轮实验数据
-        % ---------------------------------------------------------------
-
-        sampleIndex = 0;
-
-
-        full_time = [];
-
-        full_temp = [];
-
-        full_probe = [];
-
-
-        lastTemp = [];
-
-        lastProbe = [];
-
-
-        zeroReady = false;
-
-        zeroProbe = [NaN;NaN;NaN];
-
-        zeroTemp = nan(tempChannels,1);
-
-
-        sampleNumber = 0;
-
-        sampleTime = [];
-
-        sampleTemp = [];
-
-        sampleProbeMean = [];
-
-        sampleDeltaProbe = [];
-
-        sampleXYZ = [];
-
-        sampleStdXYZ = [];
-
-        sampleWindowStart = [];
-
-        sampleWindowEnd = [];
-
-
-        windowMode = 0;
-
-        windowPhase = 0;
-
-
-        simTick = 0;
-
-
-        collecting = true;
-
-
-        set(btnStart,'Enable','off');
-
-        set(btnStop,'Enable','on');
-
-        set(btnZero,'Enable','off');
-
-        set(btnSample,'Enable','off');
-
-
-        set(statusText, ...
-            'String', ...
-            '状态：正在读取 t = 0 s 初始数据');
-
-
-        set(sampleCountText, ...
-            'String', ...
-            '有效热误差样本：0');
-
-
-        set(zeroStatusText, ...
-            'String', ...
-            '冷态零点：未设置');
-
-
-        fprintf('\n=============================================\n');
-
-        fprintf('开始本轮热误差实验\n');
-
-        fprintf('固定采样周期：%d s\n', ...
-            sampleIntervalSec);
-
-        fprintf('记录时间：0、2、4、6、8…… s\n');
-
-        fprintf('=============================================\n');
-
-
-        %% ---------------------------------------------------------------
-        % t = 0 s读取一次
-        % ---------------------------------------------------------------
-
-        initialOK = false;
-
-        failureCount = 0;
-
-
-        while ~initialOK && collecting
-
-            try
-
-                [tempVals,probeVals] = ...
-                    readAllSensors();
-
-
-                sampleIndex = 0;
-
-
-                full_time = 0;
-
-                full_temp = tempVals;
-
-                full_probe = probeVals;
-
-
-                lastTemp = tempVals;
-
-                lastProbe = probeVals;
-
-
-                initialOK = true;
-
-
-                updateCurrentDisplay();
-
-                updatePlots();
-
-
-                fprintf('✅ t = 0 s 数据读取成功。\n');
-
-
-            catch ME
-
-                failureCount = ...
-                    failureCount + 1;
-
-
-                fprintf( ...
-                    '⚠️ 初始读取失败 %d 次：%s\n', ...
-                    failureCount, ...
-                    ME.message);
-
-
-                if failureCount >= 3 && ...
-                        ~simulateMode && ...
-                        autoFallbackOffline
-
-                    switchToOfflineMode( ...
-                        '设备连接成功，但读取数据失败');
-
-
-                    failureCount = 0;
-
-                else
-
-                    pause(0.5);
-
-                end
-
-            end
-
-        end
-
-
-        if ~collecting
-            return;
-        end
-
-
-        %% ---------------------------------------------------------------
-        % 建立严格2秒FixedRate定时器
-        % ---------------------------------------------------------------
-
-        acqTimer = timer( ...
-            'ExecutionMode', ...
-            'fixedRate', ...
-            'Period', ...
-            sampleIntervalSec, ...
-            'StartDelay', ...
-            sampleIntervalSec, ...
-            'BusyMode', ...
-            'drop', ...
-            'TimerFcn', ...
-            @acquisitionTick, ...
-            'ErrorFcn', ...
-            @timerErrorCallback);
-
-
-        start(acqTimer);
-
-
-        set(statusText, ...
-            'String', ...
-            '状态：每2 s固定采集中');
-
-
+        % Stop/start creates a new identity and a fresh immutable-baseline scope.
+        sessionClock=tic; sessionSequence=sessionSequence+1;
+        id=sprintf('V3_%s_%04d',datestr(now,'yyyymmddTHHMMSSFFF'),sessionSequence);
+        session.start(id,0,utcNow()); sessionSaved=false;
+        sampleIndex=0; full_time=[]; full_temp=zeros(tempChannels,0); full_probe=zeros(3,0);
+        lastTemp=[]; lastProbe=[]; zeroReady=false;
+        zeroProbe=nan(3,1); zeroTemp=nan(tempChannels,1);
+        sampleNumber=0; sampleTime=[]; sampleTemp=zeros(tempChannels,0);
+        sampleProbeMean=zeros(3,0); sampleDeltaProbe=zeros(3,0);
+        sampleXYZ=zeros(3,0); sampleStdXYZ=zeros(3,0);
+        sampleWindowStart=[]; sampleWindowEnd=[];
+        windowMode=0; windowPhase=0; collecting=true;
+        clearConfirmations();
+        set([confirmStopped confirmReturn confirmAngle],'Enable','on');
+        set(btnStart,'Enable','off'); set(btnStop,'Enable','on');
+        set(btnRecover,'Enable','off');
+        set([hTemp(:);hProbe(:);hXYZ(:)],'XData',NaN,'YData',NaN);
+        set(zeroStatusText,'String','冷态零点：未设置');
+        set(sampleCountText,'String','有效热误差样本：0');
+        set(statusText,'String','状态：实际时间采集，运行段仅记录原始量');
+        % Each poll is retained, including an initial failure. Never retry until
+        % success while manufacturing t=0 or silently changing source mode.
+        acquisitionTick([],[]);
+        if ~collecting || strcmp(session.State,'fault'), return; end
+        createAcquisitionTimer();
         refreshActionButtons();
-
     end
 
 
@@ -1239,127 +960,30 @@ updateModeText();
 % ========================================================================
 
     function acquisitionTick(~,~)
-
-        if ~collecting
-            return;
-        end
-
-
+        if ~collecting || ~strcmp(session.State,'running'), return; end
+        % Timestamp at read start/end records transport latency and true gaps.
+        readStartSec=toc(sessionClock); readStartUTC=utcNow();
+        readError='';
         try
-
-            %% -----------------------------------------------------------
-            % 读取数据
-            % -----------------------------------------------------------
-
-            [tempVals,probeVals] = ...
-                readAllSensors();
-
-
-            %% -----------------------------------------------------------
-            % 时间严格使用理论2秒网格
-            %
-            % 不用toc。
-            %
-            % Excel：
-            %
-            % 0
-            % 2
-            % 4
-            % 6
-            % ...
-            %
-            % -----------------------------------------------------------
-
-            sampleIndex = ...
-                sampleIndex + 1;
-
-
-            tNow = ...
-                sampleIndex * ...
-                sampleIntervalSec;
-
-
-            %% -----------------------------------------------------------
-            % 保存连续数据
-            % -----------------------------------------------------------
-
-            full_time(end+1) = ...
-                tNow;
-
-
-            full_temp(:,end+1) = ...
-                tempVals;
-
-
-            full_probe(:,end+1) = ...
-                probeVals;
-
-
-            lastTemp = ...
-                tempVals;
-
-
-            lastProbe = ...
-                probeVals;
-
-
-            %% -----------------------------------------------------------
-            % 当前是否正在进行冷态/热误差测量
-            % -----------------------------------------------------------
-
-            handleMeasurementWindow( ...
-                tempVals, ...
-                probeVals, ...
-                tNow);
-
-
-            %% -----------------------------------------------------------
-            % GUI
-            % -----------------------------------------------------------
-
-            updateCurrentDisplay();
-
-            updatePlots();
-
-
-            %% -----------------------------------------------------------
-            % 命令行
-            % -----------------------------------------------------------
-
-            fprintf( ...
-                ['时间=%6d s | ' ...
-                 'T1=%5.1f T2=%5.1f T3=%5.1f | ' ...
-                 'P1=%7.2f P2=%7.2f P3=%7.2f μm\n'], ...
-                tNow, ...
-                tempVals(1), ...
-                tempVals(2), ...
-                tempVals(3), ...
-                probeVals(1), ...
-                probeVals(2), ...
-                probeVals(3));
-
-
-            drawnow limitrate;
-
-
+            [tempVals,probeVals]=readAllSensors();
+            quality='ok';
         catch ME
-
-            fprintf( ...
-                '⚠️ 第%d个采样周期读取失败：%s\n', ...
-                sampleIndex+1, ...
-                ME.message);
-
-
-            % 当前设计：
-            % 单次失败不伪造数据、不增加sampleIndex。
-            %
-            % 下一次timer重新读取。
-            %
-            % 如果真实实验中频繁出现，
-            % 应优先检查RS485通信。
-
+            tempVals=nan(tempChannels,1); probeVals=nan(3,1);
+            quality='communication_error'; readError=ME.message;
         end
-
+        tNow=toc(sessionClock); stamp=utcNow();
+        session.poll(tNow,stamp,tempVals,probeVals,quality,readStartSec,readStartUTC,readError);
+        % Raw rows are projections of the core, including failed polls.
+        r=session.Rows(end); sampleIndex=sampleIndex+1;
+        full_time(end+1)=r.ElapsedSec;
+        full_temp(:,end+1)=r.Temperature; full_probe(:,end+1)=r.Probe;
+        lastTemp=r.Temperature; lastProbe=r.Probe;
+        syncSessionProjection();
+        if strcmp(session.State,'fault')
+            enterFaultUI(readError);
+        end
+        updateCurrentDisplay(); updatePlots();
+        drawnow limitrate;
     end
 
 
@@ -1368,34 +992,9 @@ updateModeText();
 % ========================================================================
 
     function zeroCallback(~,~)
-
-        if ~collecting || ...
-                windowMode ~= 0
-            return;
-        end
-
-
-        if isempty(lastProbe)
-            return;
-        end
-
-
-        [OK,message] = ...
-            checkProbeVector(lastProbe);
-
-
-        if ~OK
-
-            fprintf('\n❌ 不能设置冷态零点：%s\n', ...
-                message);
-
-            return;
-
-        end
-
-
+        % Core AND callback guard re-zero, even if invoked programmatically.
+        if ~collecting || zeroReady || windowMode~=0 || ~strcmp(session.State,'running'), return; end
         startMeasurementWindow(1);
-
     end
 
 
@@ -1404,43 +1003,8 @@ updateModeText();
 % ========================================================================
 
     function sampleCallback(~,~)
-
-        if ~collecting || ...
-                windowMode ~= 0
-            return;
-        end
-
-
-        if ~zeroReady
-
-            fprintf('\n⚠️ 请先设置冷态零点。\n');
-
-            return;
-
-        end
-
-
-        if isempty(lastProbe)
-            return;
-        end
-
-
-        [OK,message] = ...
-            checkProbeVector(lastProbe);
-
-
-        if ~OK
-
-            fprintf('\n❌ 当前不能记录样本：%s\n', ...
-                message);
-
-            return;
-
-        end
-
-
+        if ~collecting || ~zeroReady || windowMode~=0 || ~strcmp(session.State,'running'), return; end
         startMeasurementWindow(2);
-
     end
 
 
@@ -1449,59 +1013,18 @@ updateModeText();
 % ========================================================================
 
     function startMeasurementWindow(modeValue)
-
-        windowMode = modeValue;
-
-        windowPhase = 1;
-
-
-        windowRequestClock = tic;
-
-
-        windowTempBuffer = [];
-
-        windowProbeBuffer = [];
-
-        windowTimeBuffer = [];
-
-
-        set(btnZero,'Enable','off');
-
-        set(btnSample,'Enable','off');
-
-
-        if modeValue == 1
-
-            fprintf('\n=============================================\n');
-
-            fprintf('开始设置冷态零点\n');
-
-        else
-
-            fprintf('\n=============================================\n');
-
-            fprintf('开始记录第 %d 个热误差样本\n', ...
-                sampleNumber+1);
-
+        % GUI checks aid the operator; the session checks the same conditions.
+        try
+            confirmations=[get(confirmStopped,'Value'),get(confirmReturn,'Value'),get(confirmAngle,'Value')];
+            session.confirm(confirmations,toc(sessionClock),utcNow());
+            kind='baseline'; if modeValue==2, kind='heat'; end
+            session.request(kind,toc(sessionClock),utcNow());
+            windowMode=modeValue; windowPhase=1;
+            set(statusText,'String',sprintf('状态：稳定%d s，随后实际测量%d s；条件丢失即无效',settleTimeSec,measurementWindowSec));
+        catch ME
+            set(statusText,'String',['状态：拒绝测量：' ME.message]);
         end
-
-
-        fprintf('先等待稳定：%d s\n', ...
-            settleTimeSec);
-
-        fprintf('随后采集：%d 个点 × %d s\n', ...
-            measurementSamples, ...
-            sampleIntervalSec);
-
-        fprintf('=============================================\n');
-
-
-        set(statusText, ...
-            'String', ...
-            sprintf( ...
-            '状态：等待机械稳定 %d s', ...
-            settleTimeSec));
-
+        refreshActionButtons();
     end
 
 
@@ -1509,418 +1032,76 @@ updateModeText();
 % 27. 处理稳定和测量窗口
 % ========================================================================
 
-    function handleMeasurementWindow( ...
-            tempVals, ...
-            probeVals, ...
-            tNow)
-
-
-        if windowMode == 0
-            return;
+    function syncSessionProjection()
+        zeroReady=session.BaselineReady; zeroProbe=session.BaselineProbe;
+        zeroTemp=session.BaselineTemperature;
+        if isempty(session.Active)
+            if windowMode~=0, clearConfirmations(); end
+            windowMode=0; windowPhase=0;
+        else
+            windowMode=1; if strcmp(session.Active.Kind,'heat'), windowMode=2; end
+            windowPhase=1; if strcmp(session.Active.Phase,'measuring'), windowPhase=2; end
+            set(statusText,'String',sprintf('状态：%s，已收%d点；实际时间截止，不补采', ...
+                session.Active.Phase,numel(session.Active.Times)));
         end
-
-
-        %% ---------------------------------------------------------------
-        % 等待5秒
-        %
-        % 等待时间使用实际墙钟；
-        % 正式采样仍然只发生在2秒采样节点。
-        % ---------------------------------------------------------------
-
-        if windowPhase == 1
-
-            elapsed = ...
-                toc(windowRequestClock);
-
-
-            remaining = ...
-                settleTimeSec - elapsed;
-
-
-            if remaining > 0
-
-                set(statusText, ...
-                    'String', ...
-                    sprintf( ...
-                    '状态：等待稳定，还剩约 %.1f s', ...
-                    remaining));
-
-                return;
-
-            end
-
-
-            windowPhase = 2;
-
-
-            fprintf('✅ 稳定等待完成，开始正式取10个点。\n');
-
+        if zeroReady
+            set(zeroStatusText,'String',sprintf('冷态零点（本轮锁定）：%.2f / %.2f / %.2f μm',zeroProbe));
         end
-
-
-        %% ---------------------------------------------------------------
-        % 正式收集2秒采样点
-        % ---------------------------------------------------------------
-
-        if windowPhase == 2
-
-            windowTempBuffer(:,end+1) = ...
-                tempVals;
-
-
-            windowProbeBuffer(:,end+1) = ...
-                probeVals;
-
-
-            windowTimeBuffer(end+1) = ...
-                tNow;
-
-
-            currentCount = ...
-                size(windowProbeBuffer,2);
-
-
-            set(statusText, ...
-                'String', ...
-                sprintf( ...
-                '状态：测量中 %d / %d 个点', ...
-                currentCount, ...
-                measurementSamples));
-
-
-            if currentCount >= measurementSamples
-
-                processMeasurementWindow();
-
-            end
-
+        if numel(session.Samples)>sampleNumber
+            a=session.Samples(end); sampleNumber=sampleNumber+1;
+            sampleTime(end+1)=a.ElapsedSec; sampleTemp(:,end+1)=a.Temperature;
+            sampleProbeMean(:,end+1)=a.Probe; sampleDeltaProbe(:,end+1)=a.DeltaProbe;
+            sampleXYZ(:,end+1)=a.XYZ; sampleStdXYZ(:,end+1)=a.StdXYZ;
+            sampleWindowStart(end+1)=a.StartElapsedSec; sampleWindowEnd(end+1)=a.EndElapsedSec;
+            set(sampleCountText,'String',sprintf('有效热误差样本：%d',sampleNumber));
         end
-
+        if isempty(session.Active) && ~isempty(session.Windows)
+            a=session.Windows(end);
+            set(statusText,'String',sprintf('状态：上一窗口 %s %s；新窗口需重新确认',a.Quality,a.Reason));
+        end
     end
 
-
-%% ========================================================================
-% 28. 处理一个完整测量窗口
-% ========================================================================
-
-    function processMeasurementWindow()
-
-        %% ---------------------------------------------------------------
-        % 整个窗口都必须在±100 μm以内
-        % ---------------------------------------------------------------
-
-        [OK,message] = ...
-            checkProbeWindow( ...
-            windowProbeBuffer);
-
-
-        if ~OK
-
-            fprintf('\n=============================================\n');
-
-            fprintf('❌ 本次测量无效\n');
-
-            fprintf('原因：%s\n',message);
-
-            fprintf('本次数据不会进入建模样本。\n');
-
-            fprintf('=============================================\n');
-
-
-            resetMeasurementWindow();
-
-            return;
-
-        end
-
-
-        %% ---------------------------------------------------------------
-        % 平均值
-        % ---------------------------------------------------------------
-
-        meanTemp = ...
-            mean(windowTempBuffer,2);
-
-
-        meanProbe = ...
-            mean(windowProbeBuffer,2);
-
-
-        tMean = ...
-            round(mean(windowTimeBuffer));
-
-
-        tStart = ...
-            windowTimeBuffer(1);
-
-
-        tEnd = ...
-            windowTimeBuffer(end);
-
-
-        %% ---------------------------------------------------------------
-        % 冷态零点
-        % ---------------------------------------------------------------
-
-        if windowMode == 1
-
-            zeroProbe = ...
-                meanProbe;
-
-
-            zeroTemp = ...
-                meanTemp;
-
-
-            zeroReady = true;
-
-
-            fprintf('\n=============================================\n');
-
-            fprintf('✅ 冷态零点设置完成\n');
-
-            fprintf('探头1零点 = %.3f μm\n', ...
-                zeroProbe(1));
-
-            fprintf('探头2零点 = %.3f μm\n', ...
-                zeroProbe(2));
-
-            fprintf('探头3零点 = %.3f μm\n', ...
-                zeroProbe(3));
-
-
-            for ii = 1:3
-
-                if abs(zeroProbe(ii)) > ...
-                        probeRecommendedZeroLimit_um
-
-                    fprintf( ...
-                        '⚠️ 探头%d冷态位置离中点较远：%.2f μm\n', ...
-                        ii, ...
-                        zeroProbe(ii));
-
-                end
-
-            end
-
-
-            fprintf('=============================================\n');
-
-
-            set(zeroStatusText, ...
-                'String', ...
-                sprintf( ...
-                '冷态零点：P1=%.2f，P2=%.2f，P3=%.2f μm', ...
-                zeroProbe(1), ...
-                zeroProbe(2), ...
-                zeroProbe(3)));
-
-
-        %% ---------------------------------------------------------------
-        % 正式热误差样本
-        % ---------------------------------------------------------------
-
-        elseif windowMode == 2
-
-            deltaProbe = ...
-                meanProbe - ...
-                zeroProbe;
-
-
-            %% XYZ转换
-
-            if calibrationEnabled
-
-                xyzMean = ...
-                    C_xyz_from_probe * ...
-                    deltaProbe;
-
-
-                deltaProbeWindow = ...
-                    windowProbeBuffer - ...
-                    zeroProbe;
-
-
-                xyzWindow = ...
-                    C_xyz_from_probe * ...
-                    deltaProbeWindow;
-
-
-                xyzStd = ...
-                    std( ...
-                    xyzWindow, ...
-                    0, ...
-                    2);
-
-            else
-
-                xyzMean = ...
-                    [NaN;NaN;NaN];
-
-
-                xyzStd = ...
-                    [NaN;NaN;NaN];
-
-            end
-
-
-            %% 保存正式样本
-
-            sampleNumber = ...
-                sampleNumber + 1;
-
-
-            sampleTime(end+1) = ...
-                tMean;
-
-
-            sampleTemp(:,end+1) = ...
-                meanTemp;
-
-
-            sampleProbeMean(:,end+1) = ...
-                meanProbe;
-
-
-            sampleDeltaProbe(:,end+1) = ...
-                deltaProbe;
-
-
-            sampleXYZ(:,end+1) = ...
-                xyzMean;
-
-
-            sampleStdXYZ(:,end+1) = ...
-                xyzStd;
-
-
-            sampleWindowStart(end+1) = ...
-                tStart;
-
-
-            sampleWindowEnd(end+1) = ...
-                tEnd;
-
-
-            %% 显示
-
-            fprintf('\n=============================================\n');
-
-            fprintf('✅ 第 %d 个热误差样本完成\n', ...
-                sampleNumber);
-
-
-            fprintf('实验时间：%d s\n', ...
-                tMean);
-
-
-            fprintf('\n测量窗口：\n');
-
-            fprintf('%d s ～ %d s\n', ...
-                tStart, ...
-                tEnd);
-
-
-            fprintf('\n探头平均值：\n');
-
-            fprintf('P1 = %.3f μm\n', ...
-                meanProbe(1));
-
-            fprintf('P2 = %.3f μm\n', ...
-                meanProbe(2));
-
-            fprintf('P3 = %.3f μm\n', ...
-                meanProbe(3));
-
-
-            fprintf('\n相对冷态变化：\n');
-
-            fprintf('ΔP1 = %.3f μm\n', ...
-                deltaProbe(1));
-
-            fprintf('ΔP2 = %.3f μm\n', ...
-                deltaProbe(2));
-
-            fprintf('ΔP3 = %.3f μm\n', ...
-                deltaProbe(3));
-
-
-            if calibrationEnabled
-
-                fprintf('\nXYZ热误差：\n');
-
-                fprintf('X = %.3f μm\n', ...
-                    xyzMean(1));
-
-                fprintf('Y = %.3f μm\n', ...
-                    xyzMean(2));
-
-                fprintf('Z = %.3f μm\n', ...
-                    xyzMean(3));
-
-
-                fprintf('\n窗口波动标准差：\n');
-
-                fprintf('σX = %.3f μm\n', ...
-                    xyzStd(1));
-
-                fprintf('σY = %.3f μm\n', ...
-                    xyzStd(2));
-
-                fprintf('σZ = %.3f μm\n', ...
-                    xyzStd(3));
-
-            else
-
-                fprintf('\n⚠️ 当前没有真实XYZ标定矩阵。\n');
-
-            end
-
-
-            fprintf('=============================================\n');
-
-
-            set(sampleCountText, ...
-                'String', ...
-                sprintf( ...
-                '有效热误差样本：%d', ...
-                sampleNumber));
-
-        end
-
-
-        resetMeasurementWindow();
-
-    end
-
-
-%% ========================================================================
-% 29. 重置测量窗口
-% ========================================================================
-
-    function resetMeasurementWindow()
-
-        windowMode = 0;
-
-        windowPhase = 0;
-
-
-        windowTempBuffer = [];
-
-        windowProbeBuffer = [];
-
-        windowTimeBuffer = [];
-
-
-        set(statusText, ...
-            'String', ...
-            '状态：每2 s固定连续采集中');
-
-
+    function confirmationCallback(~,~)
+        if ~collecting, return; end
+        confirmations=[get(confirmStopped,'Value'),get(confirmReturn,'Value'),get(confirmAngle,'Value')];
+        hadWindow=~isempty(session.Active);
+        session.confirm(confirmations,toc(sessionClock),utcNow());
+        if hadWindow && isempty(session.Active), syncSessionProjection(); end
         refreshActionButtons();
-
     end
 
+    function clearConfirmations()
+        set([confirmStopped confirmReturn confirmAngle],'Value',0);
+    end
+
+    function createAcquisitionTimer()
+        acqTimer=timer('ExecutionMode','fixedSpacing','Period',sampleIntervalSec, ...
+            'StartDelay',sampleIntervalSec,'BusyMode','drop', ...
+            'TimerFcn',@acquisitionTick,'ErrorFcn',@timerErrorCallback);
+        start(acqTimer);
+    end
+
+    function enterFaultUI(reason)
+        % V3 reads only. Do not invent machine/valve commands on fault.
+        stopAndDeleteTimer(); clearConfirmations();
+        set([confirmStopped confirmReturn confirmAngle],'Enable','off');
+        set(btnRecover,'Enable','on');
+        set(statusText,'String',['状态：故障，需显式恢复；' reason]);
+        refreshActionButtons();
+    end
+
+    function recoverCallback(~,~)
+        if ~collecting || ~strcmp(session.State,'fault'), return; end
+        session.recover(toc(sessionClock),utcNow());
+        clearConfirmations(); set([confirmStopped confirmReturn confirmAngle],'Enable','on');
+        set(btnRecover,'Enable','off');
+        set(statusText,'String','状态：已显式恢复；本轮基准保留，测量需重新确认');
+        createAcquisitionTimer(); refreshActionButtons();
+    end
+
+    function stamp=utcNow()
+        stamp=char(datetime('now','TimeZone','UTC','Format',"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"));
+    end
 
 %% ========================================================================
 % 30. 读取全部传感器
@@ -2049,15 +1230,8 @@ updateModeText();
             generateSimulationData()
 
 
-        %% 每调用一次相当于2秒
-
-        t = ...
-            simTick * ...
-            sampleIntervalSec;
-
-
-        simTick = ...
-            simTick + 1;
+        % 模拟同样使用实际经过时间，不把轮询次数当作时钟。
+        t=toc(sessionClock);
 
 
         %% ---------------------------------------------------------------
@@ -2398,9 +1572,9 @@ updateModeText();
         %% XYZ
 
         xyzNames = { ...
-            'X方向热误差', ...
-            'Y方向热误差', ...
-            'Z方向热误差'};
+            '最近有效窗口X热误差', ...
+            '最近有效窗口Y热误差', ...
+            '最近有效窗口Z热误差'};
 
 
         if sampleNumber > 0
@@ -2455,57 +1629,18 @@ updateModeText();
 % ========================================================================
 
     function refreshActionButtons()
-
-        if ~collecting || ...
-                windowMode ~= 0
-
-            set(btnZero,'Enable','off');
-
-            set(btnSample,'Enable','off');
-
+        set(btnZero,'Enable','off'); set(btnSample,'Enable','off');
+        if ~collecting || windowMode~=0 || ~strcmp(session.State,'running') || ...
+                isempty(lastProbe) || isempty(lastTemp) || any(~isfinite(lastTemp))
             return;
-
         end
-
-
-        if isempty(lastProbe)
-
-            set(btnZero,'Enable','off');
-
-            set(btnSample,'Enable','off');
-
-            return;
-
-        end
-
-
-        [OK,~] = ...
-            checkProbeVector(lastProbe);
-
-
-        if OK
-
-            set(btnZero,'Enable','on');
-
-
-            if zeroReady
-
-                set(btnSample,'Enable','on');
-
-            else
-
-                set(btnSample,'Enable','off');
-
-            end
-
+        [OK,~]=checkProbeVector(lastProbe);
+        if ~OK || ~all(session.Confirmations), return; end
+        if zeroReady
+            set(btnSample,'Enable','on');
         else
-
-            set(btnZero,'Enable','off');
-
-            set(btnSample,'Enable','off');
-
+            set(btnZero,'Enable','on');
         end
-
     end
 
 
@@ -2559,7 +1694,7 @@ updateModeText();
 
 
         allTemp = ...
-            tempPlot(:);
+            tempPlot(isfinite(tempPlot));
 
 
         if ~isempty(allTemp)
@@ -2720,56 +1855,26 @@ updateModeText();
 % ========================================================================
 
     function stopCallback(~,~)
-
-        if ~collecting
+        if collecting
+            % Cancellation is recorded before saving, even with zero points.
+            stopAndDeleteTimer();
+            session.stop(toc(sessionClock),utcNow()); syncSessionProjection();
+            collecting=false; clearConfirmations();
+            set([confirmStopped confirmReturn confirmAngle],'Enable','off');
+            set(btnRecover,'Enable','off');
+        elseif sessionSaved
             return;
         end
-
-
-        collecting = false;
-
-
-        set(statusText, ...
-            'String', ...
-            '状态：停止采集，正在保存数据');
-
-
-        %% 停止Timer
-
-        stopAndDeleteTimer();
-
-
-        %% 保存
-
-        saveData();
-
-
-        %% GUI按钮
-
-        set(btnStart,'Enable','on');
-
-        set(btnStop,'Enable','off');
-
-        set(btnZero,'Enable','off');
-
-        set(btnSample,'Enable','off');
-
-
-        set(statusText, ...
-            'String', ...
-            '状态：实验结束');
-
-
-        fprintf('\n🏁 本轮实验结束。\n');
-
-
-        if pendingClose && ...
-                ishandle(fig)
-
-            delete(fig);
-
+        sessionSaved=saveData();
+        set(btnStart,'Enable','on'); set(btnZero,'Enable','off'); set(btnSample,'Enable','off');
+        if sessionSaved
+            set(btnStop,'Enable','off'); set(statusText,'String','状态：实验结束，原始/窗口/事件均已保存');
+            if pendingClose && ishandle(fig), delete(fig); end
+        else
+            % Failed disk export must not be erased by a new experiment/close.
+            set(btnStop,'Enable','on'); set(statusText,'String','状态：保存失败，请检查路径后点击停止并保存重试');
+            pendingClose=false;
         end
-
     end
 
 
@@ -2777,400 +1882,103 @@ updateModeText();
 % 40. 保存全部中文Excel
 % ========================================================================
 
-    function saveData()
-
-        if isSaving
-            return;
-        end
-
-
-        isSaving = true;
-
-
-        fileName = ...
-            sprintf( ...
-            '龙门机床热误差实验_%s.xlsx', ...
-            datestr( ...
-            now, ...
-            'yyyymmdd_HHMMSS'));
-
-
-        fprintf('\n=============================================\n');
-
-        fprintf('开始保存Excel...\n');
-
-
+    function saved=saveData()
+        saved=false;
+        if isSaving || isempty(session.SessionID), return; end
+        isSaving=true;
+        % Keep the legacy Chinese workbook/sheet identity and current folder.
+        % Legacy time columns now mean actual monotonic elapsed time, and
+        % explicit ElapsedSec / UTC / read boundaries document that change.
+        fileBase=['龙门机床热误差实验_' session.SessionID];
+        fileName=[fileBase '.xlsx'];
         try
-
-            %% ============================================================
-            % Sheet 1：连续采集数据
-            % ============================================================
-
-            continuousHeader = ...
-                cell(1, ...
-                1+tempChannels+3);
-
-
-            continuousHeader{1} = ...
-                '时间/s';
-
-
-            for ii = 1:tempChannels
-
-                continuousHeader{1+ii} = ...
-                    sprintf( ...
-                    '%s/℃', ...
-                    tempNames{ii});
-
+            continuousHeader={'时间/s'};
+            for ii=1:tempChannels
+                continuousHeader{end+1}=sprintf('%s/℃',tempNames{ii});
             end
+            continuousHeader=[continuousHeader,{'探头1/μm','探头2/μm','探头3/μm'}];
+            continuousMatrix=[full_time',full_temp',full_probe'];
+            if isempty(full_time), continuousMatrix=zeros(0,numel(continuousHeader)); end
+            [auditHeader,auditRows]=session.auditData('rows');
+            % Numeric sensor columns stay in their original positions. Add
+            % row-level mode/source/time/quality and identity after them.
+            metadata=~ismember(auditHeader,{'Temperature','Probe'});
+            continuousCells=[num2cell(continuousMatrix),auditRows(:,metadata)];
+            continuousHeader=[continuousHeader,auditHeader(metadata)];
+            writecell([continuousHeader;continuousCells],fileName,'Sheet','连续采集数据');
+            writecell([continuousHeader;continuousCells],[fileBase '_连续采集数据.csv']);
 
-
-            continuousHeader{ ...
-                1+tempChannels+1} = ...
-                '探头1/μm';
-
-
-            continuousHeader{ ...
-                1+tempChannels+2} = ...
-                '探头2/μm';
-
-
-            continuousHeader{ ...
-                1+tempChannels+3} = ...
-                '探头3/μm';
-
-
-            continuousMatrix = [ ...
-                full_time', ...
-                full_temp', ...
-                full_probe' ...
-                ];
-
-
-            writecell( ...
-                continuousHeader, ...
-                fileName, ...
-                'Sheet', ...
-                '连续采集数据', ...
-                'Range', ...
-                'A1');
-
-
-            writematrix( ...
-                continuousMatrix, ...
-                fileName, ...
-                'Sheet', ...
-                '连续采集数据', ...
-                'Range', ...
-                'A2');
-
-
-            %% ============================================================
-            % Sheet 2：热误差建模样本
-            % ============================================================
-
-            if sampleNumber > 0
-
-                sampleHeader = { ...
-                    '样本编号', ...
-                    '实验时间/s', ...
-                    '实验时间/min', ...
-                    '测量起始时间/s', ...
-                    '测量结束时间/s'};
-
-
-                %% 18温度
-
-                for ii = 1:tempChannels
-
-                    sampleHeader{end+1} = ...
-                        sprintf( ...
-                        '%s平均温度/℃', ...
-                        tempNames{ii});
-
-                end
-
-
-                %% 探头
-
-                sampleHeader = [ ...
-                    sampleHeader, ...
-                    { ...
-                    '探头1平均值/μm', ...
-                    '探头2平均值/μm', ...
-                    '探头3平均值/μm', ...
-                    '探头1相对冷态变化/μm', ...
-                    '探头2相对冷态变化/μm', ...
-                    '探头3相对冷态变化/μm', ...
-                    'X方向热误差/μm', ...
-                    'Y方向热误差/μm', ...
-                    'Z方向热误差/μm', ...
-                    'X方向窗口标准差/μm', ...
-                    'Y方向窗口标准差/μm', ...
-                    'Z方向窗口标准差/μm'} ...
-                    ];
-
-
-                sampleNo = ...
-                    (1:sampleNumber)';
-
-
-                sampleMatrix = [ ...
-                    sampleNo, ...
-                    sampleTime', ...
-                    sampleTime'/60, ...
-                    sampleWindowStart', ...
-                    sampleWindowEnd', ...
-                    sampleTemp', ...
-                    sampleProbeMean', ...
-                    sampleDeltaProbe', ...
-                    sampleXYZ', ...
-                    sampleStdXYZ' ...
-                    ];
-
-
-                writecell( ...
-                    sampleHeader, ...
-                    fileName, ...
-                    'Sheet', ...
-                    '热误差建模样本', ...
-                    'Range', ...
-                    'A1');
-
-
-                writematrix( ...
-                    sampleMatrix, ...
-                    fileName, ...
-                    'Sheet', ...
-                    '热误差建模样本', ...
-                    'Range', ...
-                    'A2');
-
+            sampleHeader={'样本编号','实验时间/s','实验时间/min','测量起始时间/s','测量结束时间/s'};
+            for ii=1:tempChannels
+                sampleHeader{end+1}=sprintf('%s平均温度/℃',tempNames{ii});
             end
+            sampleHeader=[sampleHeader, ...
+                {'探头1平均值/μm','探头2平均值/μm','探头3平均值/μm', ...
+                '探头1相对冷态变化/μm','探头2相对冷态变化/μm','探头3相对冷态变化/μm', ...
+                'X方向热误差/μm','Y方向热误差/μm','Z方向热误差/μm', ...
+                'X方向窗口标准差/μm','Y方向窗口标准差/μm','Z方向窗口标准差/μm'}];
+            sampleMatrix=[(1:sampleNumber)',sampleTime',sampleTime'/60, ...
+                sampleWindowStart',sampleWindowEnd',sampleTemp',sampleProbeMean', ...
+                sampleDeltaProbe',sampleXYZ',sampleStdXYZ'];
+            if sampleNumber==0, sampleMatrix=zeros(0,numel(sampleHeader)); end
+            [auditHeader,auditRows]=session.auditData('samples');
+            metadata=~ismember(auditHeader,{'Temperature','Probe','DeltaProbe','XYZ','StdXYZ'});
+            sampleCells=[num2cell(sampleMatrix),auditRows(:,metadata)];
+            sampleHeader=[sampleHeader,auditHeader(metadata)];
+            % Write headers even when there are no accepted heat samples.
+            writecell([sampleHeader;sampleCells],fileName,'Sheet','热误差建模样本');
+            writecell([sampleHeader;sampleCells],[fileBase '_热误差建模样本.csv']);
 
-
-            %% ============================================================
-            % Sheet 3：温度测点说明
-            % ============================================================
-
-            tempMap = ...
-                cell(tempChannels+1,2);
-
-
-            tempMap(1,:) = ...
-                {'温度通道','测点名称'};
-
-
-            for ii = 1:tempChannels
-
-                tempMap{ii+1,1} = ...
-                    sprintf('T%d',ii);
-
-
-                tempMap{ii+1,2} = ...
-                    tempNames{ii};
-
+            tempMap=cell(tempChannels+1,2); tempMap(1,:)={'温度通道','测点名称'};
+            for ii=1:tempChannels
+                tempMap(ii+1,:)={sprintf('T%d',ii),tempNames{ii}};
             end
-
-
-            writecell( ...
-                tempMap, ...
-                fileName, ...
-                'Sheet', ...
-                '温度测点说明');
-
-
-            %% ============================================================
-            % Sheet 4：冷态零点
-            % ============================================================
-
-            if zeroReady
-
-                zeroCell = { ...
-                    '探头','冷态零点/μm'; ...
-                    '探头1',zeroProbe(1); ...
-                    '探头2',zeroProbe(2); ...
-                    '探头3',zeroProbe(3)};
-
-
-                writecell( ...
-                    zeroCell, ...
-                    fileName, ...
-                    'Sheet', ...
-                    '冷态零点');
-
+            writecell(tempMap,fileName,'Sheet','温度测点说明');
+            zeroCell={'探头','冷态零点/μm','Mode','SessionID','BaselineID','calibration_version'};
+            for ii=1:3
+                zeroCell(end+1,:)={sprintf('探头%d',ii),zeroProbe(ii),session.Mode,session.SessionID,session.BaselineID,session.CalibrationVersion};
             end
-
-
-            %% ============================================================
-            % Sheet 5：三探头标定矩阵
-            % ============================================================
-
-            if calibrationEnabled
-
-                calibrationCell = { ...
-                    '', ...
-                    '探头1', ...
-                    '探头2', ...
-                    '探头3'; ...
-                    'X方向', ...
-                    C_xyz_from_probe(1,1), ...
-                    C_xyz_from_probe(1,2), ...
-                    C_xyz_from_probe(1,3); ...
-                    'Y方向', ...
-                    C_xyz_from_probe(2,1), ...
-                    C_xyz_from_probe(2,2), ...
-                    C_xyz_from_probe(2,3); ...
-                    'Z方向', ...
-                    C_xyz_from_probe(3,1), ...
-                    C_xyz_from_probe(3,2), ...
-                    C_xyz_from_probe(3,3)};
-
-
-                writecell( ...
-                    calibrationCell, ...
-                    fileName, ...
-                    'Sheet', ...
-                    '三探头标定矩阵');
-
+            writecell(zeroCell,fileName,'Sheet','冷态零点');
+            calibrationCell=[{'','探头1','探头2','探头3'}; ...
+                [{'X方向';'Y方向';'Z方向'},num2cell(C_xyz_from_probe)]];
+            writecell(calibrationCell,fileName,'Sheet','三探头标定矩阵');
+            calibrationString='未进行XYZ系统标定（XYZ为NaN）';
+            if calibrationEnabled, calibrationString='已加载标定文件'; end
+            settingCell={'参数','设置值'; ...
+                '实验模式',session.Mode;'SessionID',session.SessionID;'BaselineID',session.BaselineID; ...
+                'COM端口（未连接）',comPort;'通信波特率（未核验）',baudRate; ...
+                '计划连续采样周期/s',sampleIntervalSec;'定时策略','FixedSpacing / BusyMode drop'; ...
+                '时间列含义','实际单调经过秒数；UTC记录读取边界；不承诺严格2秒或无丢失'; ...
+                '返回检测位稳定时间/s',settleTimeSec;'热误差测量窗口最大时长/s',measurementWindowSec; ...
+                '每次测量最少有效采样点数',measurementSamples; ...
+                '探头有效范围/μm','-100 ~ +100';'XYZ标定状态',calibrationString; ...
+                '标定文件',calibrationFile;'calibration_version',session.CalibrationVersion; ...
+                '标定标识含义','矩阵内容标识，保留符号与17位精度，不代表现场核验'; ...
+                '真实设备状态','未核验，真实模式构造时拒绝'; ...
+                '三项操作确认','主轴停止；同向返回固定点；独立角度复位；每窗重置'; ...
+                '窗口范围','[请求时刻+稳定期, 请求时刻+稳定期+窗口时长)，截止轮询不纳入平均'; ...
+                '样本UTC含义','窗口完成UTC；StartUTC/EndUTC对应首末纳入点'; ...
+                '运行段XYZ','只显示最近已完成窗口的XYZ，不由运行探头实时换算'};
+            writecell(settingCell,fileName,'Sheet','实验参数');
+            kinds={'windows','events'}; sheets={'测量窗口记录','实验事件日志'};
+            for ii=1:numel(kinds)
+                [headers,rows]=session.auditData(kinds{ii});
+                writecell([headers;rows],fileName,'Sheet',sheets{ii});
+                writecell([headers;rows],[fileBase '_' sheets{ii} '.csv']);
             end
-
-
-            %% ============================================================
-            % Sheet 6：实验参数
-            % ============================================================
-
-            if simulateMode
-
-                modeString = ...
-                    '离线模拟模式';
-
-            else
-
-                modeString = ...
-                    '真实采集模式';
-
-            end
-
-
-            if calibrationIsDemo
-
-                calibrationString = ...
-                    '演示标定矩阵';
-
-            elseif calibrationEnabled
-
-                calibrationString = ...
-                    '真实标定矩阵';
-
-            else
-
-                calibrationString = ...
-                    '未进行XYZ系统标定';
-
-            end
-
-
-            settingCell = { ...
-                '参数','设置值'; ...
-                '实验模式',modeString; ...
-                'COM端口',comPort; ...
-                '通信波特率',baudRate; ...
-                '固定连续采样周期/s',sampleIntervalSec; ...
-                '返回检测位稳定时间/s',settleTimeSec; ...
-                '热误差测量窗口/s',measurementWindowSec; ...
-                '每次测量采样点数',measurementSamples; ...
-                '探头1 Modbus地址',probeSensors(1).id; ...
-                '探头2 Modbus地址',probeSensors(2).id; ...
-                '探头3 Modbus地址',probeSensors(3).id; ...
-                '探头PV寄存器',probeSensors(1).reg; ...
-                '探头寄存器缩放',probeSensors(1).scale; ...
-                '电涡流有效范围/μm','-100 ~ +100'; ...
-                '边界预警范围/μm','±90 ~ ±100'; ...
-                'XYZ标定状态',calibrationString};
-
-
-            writecell( ...
-                settingCell, ...
-                fileName, ...
-                'Sheet', ...
-                '实验参数');
-
-
-            fprintf('✅ Excel保存成功。\n');
-
-            fprintf('文件：%s\n', ...
-                fileName);
-
-
-            fprintf('连续采样点：%d\n', ...
-                length(full_time));
-
-
-            fprintf('热误差建模样本：%d\n', ...
-                sampleNumber);
-
-
-            fprintf('=============================================\n');
-
-
+            fprintf('Excel及CSV已保存：%s；原始行%d，样本%d，窗口%d，事件%d\n', ...
+                fileName,numel(session.Rows),numel(session.Samples),numel(session.Windows),numel(session.Events));
+            saved=true;
         catch ME
-
-            fprintf('\n❌ Excel保存失败：\n');
-
-            fprintf('%s\n',ME.message);
-
+            fprintf('保存失败（内存记录保留，阻止直接开启下一实验）：%s\n',ME.message);
         end
-
-
-        isSaving = false;
-
+        isSaving=false;
     end
 
 
 %% ========================================================================
-% 41. 自动切换离线模式
+% 41. 自动模式切换已移除；故障恢复见显式恢复按钮
 % ========================================================================
-
-    function switchToOfflineMode(reason)
-
-        fprintf('\n=============================================\n');
-
-        fprintf('⚠️ 自动进入离线模拟模式\n');
-
-        fprintf('原因：%s\n',reason);
-
-        fprintf('=============================================\n');
-
-
-        simulateMode = true;
-
-        m = [];
-
-
-        simTick = 0;
-
-
-        if ~calibrationEnabled
-
-            C_xyz_from_probe = [ ...
-                 1.000,  0.035, -0.020; ...
-                -0.025,  1.000,  0.030; ...
-                 0.018, -0.022,  1.000 ...
-                ];
-
-
-            calibrationEnabled = true;
-
-            calibrationIsDemo = true;
-
-        end
-
-
-        updateModeText();
-
-    end
-
 
 %% ========================================================================
 % 42. 更新模式文字
@@ -3213,18 +2021,11 @@ updateModeText();
 % ========================================================================
 
     function timerErrorCallback(~,event)
-
-        fprintf('\n⚠️ 2秒采样定时器发生错误。\n');
-
-
-        try
-
-            fprintf('%s\n', ...
-                event.Data.Message);
-
-        catch
-        end
-
+        if ~collecting, return; end
+        reason='timer_error';
+        try, reason=event.Data.Message; catch, end
+        session.fault(toc(sessionClock),utcNow(),reason);
+        syncSessionProjection(); enterFaultUI(reason);
     end
 
 
@@ -3264,7 +2065,7 @@ updateModeText();
 
     function closeFigure(~,~)
 
-        if collecting
+        if collecting || ~sessionSaved
 
             pendingClose = true;
 
@@ -3300,14 +2101,6 @@ updateModeText();
         try
 
             m = [];
-
-        catch
-        end
-
-
-        try
-
-            delete(instrfindall);
 
         catch
         end

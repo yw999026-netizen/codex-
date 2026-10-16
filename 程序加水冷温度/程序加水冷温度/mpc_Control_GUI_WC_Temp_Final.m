@@ -1,4 +1,7 @@
-function MPC_Ultimate_Exp()
+function mpc_Control_GUI_WC_Temp_Final()
+% 2026-10-16：历史温控算法模拟演示；真实设备入口已禁用。
+% 开度u为未核实历史数值单位，不能解释为百分比或角度。
+addpath(fileparts(fileparts(fileparts(mfilename('fullpath')))));
 % =====================================================================
 % 五轴机床 MIMO-MPC 智能全解耦控制平台 - 水冷温度扩展完整版本
 % 核心特性：三段全景监测 UI、零崩溃容错机制、辅机启停状态监控
@@ -6,7 +9,7 @@ function MPC_Ultimate_Exp()
 % =====================================================================
 
 %% ------------------- [1. 主窗口设计] -------------------
-hFig = figure('Name', 'MIMO-MPC 五轴机床智能热控制平台', ...
+hFig = figure('Name', '历史模拟 · MIMO-MPC 五轴机床智能热控制平台', ...
 'Position', [100, 50, 1350, 750], ...
 'MenuBar', 'none', 'ToolBar', 'none', ...
 'Color', [0.92 0.94 0.96], ...
@@ -64,7 +67,7 @@ handles.txt_TempInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprin
 handles.txt_WCInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('水冷状态/温度:\nWC1(床身): -- | --.-℃\nWC2(立柱): -- | --.-℃\nWC3(横梁): -- | --.-℃\n'), ...
 'BackgroundColor', 'white', 'ForegroundColor', [0.1 0.6 0.1], 'FontSize', 10, 'FontWeight', 'bold', 'Units', 'normalized', 'Position', [0.36, 0.05, 0.30, 0.9], 'HorizontalAlignment', 'left');
 
-handles.txt_ValveInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('独立阀门开度 (%%):\nV1(床左): -- V2(床右): -- \nV4(柱左): -- V5(柱右): -- \nV7(梁上): -- V8(梁下): -- '), ...
+handles.txt_ValveInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('历史模拟指令u（单位未核实）:\nV1(床左): -- V2(床右): -- \nV4(柱左): -- V5(柱右): -- \nV7(梁上): -- V8(梁下): -- '), ...
 'BackgroundColor', 'white', 'ForegroundColor', [0.1 0.4 0.8], 'FontSize', 10, 'FontWeight', 'bold', 'Units', 'normalized', 'Position', [0.68, 0.05, 0.30, 0.9], 'HorizontalAlignment', 'left');
 
 %% ------------------- [5. 下方：三段式绘图区] -------------------
@@ -88,7 +91,7 @@ handles.lineWC3 = plot(handles.axWC, NaN, NaN, '-', 'Color', [0.1 0.1 0.8], 'Lin
 legend(handles.axWC, 'WC1(床身)', 'WC2(立柱)', 'WC3(横梁)', 'Location', 'northwest', 'Orientation', 'horizontal');
 
 handles.axValve = axes('Parent', hFig, 'Position', [0.05, 0.06, 0.92, 0.22]);
-xlabel('运行时间 (秒)', 'FontWeight', 'bold'); ylabel('阀门开度(%)', 'FontWeight', 'bold');
+xlabel('运行时间 (秒)', 'FontWeight', 'bold'); ylabel('阀门指令u（单位未核实）', 'FontWeight', 'bold');
 grid(handles.axValve, 'on'); hold(handles.axValve, 'on'); ylim(handles.axValve, [-5 95]);
 set(handles.axValve, 'Color', [0.98 0.98 0.98]);
 handles.lineV1 = plot(handles.axValve, NaN, NaN, '-', 'Color', [0.8 0.1 0.1], 'LineWidth', 2);
@@ -107,6 +110,13 @@ handles = guidata(hObj);
 if handles.isRunning; return; end
 
 isSimMode = get(handles.chk_SimMode, 'Value');
+try
+    labshared.requireSimulation(isSimMode);
+catch err
+    errordlg(err.message,'真实模式未启用'); return;
+end
+handles.executionMode='simulation'; handles.wallClock=tic;
+set(handles.chk_SimMode,'Enable','off');
 P = str2double(get(handles.edit_P, 'String'));
 M = str2double(get(handles.edit_M, 'String'));
 Ts = 1;
@@ -161,7 +171,9 @@ handles.dataFile = ['Exp_MPC_Data_' datestr(now, 'mmdd_HHMM') '.xlsx'];
 header = {'Time(s)', 'T1_Bed', 'T2_Col_L', 'T3_Col_R', 'T4_Beam', 'T5_Env', ...
           'WC1_Temp', 'WC2_Temp', 'WC3_Temp', ...
           'WC1', 'WC2', 'WC3', ...
-          'V1', 'V2', 'V4', 'V5', 'V7', 'V8'};
+          'V1_u', 'V2_u', 'V4_u', 'V5_u', 'V7_u', 'V8_u', ...
+                  'UTC','Mode','Quality','WriteStatus','CommandUnit','V1_requested','V2_requested','V4_requested','V5_requested','V7_requested','V8_requested', ...
+                  'V1_register_legacy','V2_register_legacy','V4_register_legacy','V5_register_legacy','V7_register_legacy','V8_register_legacy'};
 try writecell(header, handles.dataFile); catch, end
 
 set(handles.lineT1, 'XData', [], 'YData', []); set(handles.lineT2, 'XData', [], 'YData', []);
@@ -184,7 +196,7 @@ if ~ishandle(hFig); return; end
 handles = guidata(hFig);
 if ~handles.isRunning; return; end
 
-isSimMode = get(handles.chk_SimMode, 'Value');
+isSimMode = strcmp(handles.executionMode,'simulation');
 
 T_curr = zeros(5,1);
 if isSimMode
@@ -204,9 +216,9 @@ else
         end
     catch
         if ~isempty(handles.temp5_log)
-            T_curr = handles.temp5_log(:, end);
+            T_curr = NaN(5,1); error('lab:ReadFailure','Temperature unavailable; no stale substitution');
         else
-            T_curr = [20;20;20;20;20];
+            T_curr = NaN(5,1); error('lab:ReadFailure','Temperature unavailable; no default substitution');
         end
     end
 end
@@ -228,7 +240,7 @@ if ~isSimMode
     end
 end
 
-T_wc = zeros(3,1);
+T_wc = NaN(3,1);
 if ~isSimMode
     try
         T_wc(1) = read(handles.wc_modbus, 'holdingregs', 101, 1) / 10;
@@ -236,7 +248,7 @@ if ~isSimMode
         T_wc(3) = read(handles.wc_modbus, 'holdingregs', 103, 1) / 10;
     catch
         if ~isempty(handles.wc_temp_log)
-            T_wc = handles.wc_temp_log(:, end);
+            T_wc = NaN(3,1); error('lab:ReadFailure','Water temperature unavailable');
         end
     end
 else
@@ -245,7 +257,7 @@ end
 
 T_target = [20; 20; 20; 20; 20];
 u_cmd = mpcmove(handles.mpcobj, handles.xc, T_curr, T_target);
-u_cmd = max(0, min(90, u_cmd));
+u_requested=u_cmd; [u_cmd,register_values]=labshared.legacyValveCommand(u_requested);
 handles.sim_last_u = u_cmd;
 
 if ~isSimMode
@@ -261,12 +273,12 @@ end
 
 str_t = sprintf('机床温度 (℃):\nT1(床身): %.1f\nT2(柱左): %.1f\nT3(柱右): %.1f\nT4(梁上): %.1f\nT5(环境): %.1f', T_curr(1), T_curr(2), T_curr(3), T_curr(4), T_curr(5));
 str_wc = sprintf('水冷状态/温度:\nWC1(床身): %d | %.1f℃\nWC2(立柱): %d | %.1f℃\nWC3(横梁): %d | %.1f℃', wc1, T_wc(1), wc2, T_wc(2), wc3, T_wc(3));
-str_v = sprintf('独立阀门开度 (%%):\nV1(床左): %02.0f V2(床右): %02.0f\nV4(柱左): %02.0f V5(柱右): %02.0f\nV7(梁上): %02.0f V8(梁下): %02.0f', u_cmd(1), u_cmd(2), u_cmd(3), u_cmd(4), u_cmd(5), u_cmd(6));
+str_v = sprintf('历史模拟指令u（单位未核实）:\nV1(床左): %02.0f V2(床右): %02.0f\nV4(柱左): %02.0f V5(柱右): %02.0f\nV7(梁上): %02.0f V8(梁下): %02.0f', u_cmd(1), u_cmd(2), u_cmd(3), u_cmd(4), u_cmd(5), u_cmd(6));
 set(handles.txt_TempInfo, 'String', str_t);
 set(handles.txt_WCInfo, 'String', str_wc);
 set(handles.txt_ValveInfo, 'String', str_v);
 
-t_now = length(handles.time_log);
+t_now = toc(handles.wallClock);
 handles.time_log = [handles.time_log, t_now];
 handles.temp5_log = [handles.temp5_log, T_curr];
 handles.wc3_log = [handles.wc3_log, wc_state];
@@ -274,7 +286,7 @@ handles.wc_temp_log = [handles.wc_temp_log, T_wc];
 handles.valve6_log = [handles.valve6_log, u_cmd];
 
 row_data = round([t_now, T_curr', T_wc', wc_state', u_cmd'], 2);
-try writematrix(row_data, handles.dataFile, 'WriteMode', 'append'); catch, end
+try writecell([num2cell(row_data),{labshared.utcNow(),'simulation','SYNTHETIC_DATA','SIMULATED_COMMAND_NOT_SENT','legacy_u_unverified'},num2cell(u_requested'),num2cell(register_values')], handles.dataFile, 'WriteMode', 'append'); catch, end
 
 set(handles.lineT1, 'XData', handles.time_log, 'YData', handles.temp5_log(1,:));
 set(handles.lineT2, 'XData', handles.time_log, 'YData', handles.temp5_log(2,:));
@@ -313,6 +325,7 @@ function stopSystem(hObj, ~)
 try
 handles = guidata(hObj);
 handles.isRunning = false;
+            set(handles.chk_SimMode,'Enable','on');
 if ~isempty(handles.sim_timer); stop(handles.sim_timer); delete(handles.sim_timer); handles.sim_timer = []; end
 
 try write(handles.wc_modbus, 'holdingregs', 1, 0); catch, end
