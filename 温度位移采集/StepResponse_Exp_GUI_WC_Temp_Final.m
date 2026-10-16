@@ -1,4 +1,7 @@
 function StepResponse_Exp_GUI_WC_Temp_Final()
+% 2026-10-16：历史温控算法模拟演示；真实设备入口已禁用。
+% 开度u为未核实历史数值单位，不能解释为百分比或角度。
+addpath(fileparts(fileparts(mfilename('fullpath'))));
     % =====================================================================
     % 五轴机床系统辨识(阶跃响应)专用实验平台 - 水冷温度扩展完整版本
     % 核心更新：1. 强制水泵常开，确保阶跃冷源恒定
@@ -9,7 +12,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
     % =====================================================================
 
     %% ------------------- [1. 主窗口设计] -------------------
-    hFig = figure('Name', '机床热特性阶跃响应实验平台', ...
+    hFig = figure('Name', '历史模拟 · 机床热特性阶跃响应实验平台', ...
                   'Position', [100, 50, 1350, 750], ...
                   'MenuBar', 'none', 'ToolBar', 'none', ...
                   'Color', [0.92 0.94 0.96], ...
@@ -47,7 +50,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
     handles.stopBtn = uicontrol(hSysPanel, 'Style', 'pushbutton', 'String', '⏹ 停止', 'FontSize', 11, 'FontWeight', 'bold', 'Units', 'normalized', 'Position', [0.50, 0.02, 0.42, 0.15], 'BackgroundColor', [0.9 0.3 0.3], 'ForegroundColor', 'white', 'Callback', @stopSystem);
 
     %% ------------------- [3. 中间：独立阶跃阀门控制区] -------------------
-    hValvePanel = uipanel(hFig, 'Title', '🎛️ 独立阶跃阀门控制 (0 - 90%)', 'FontSize', 12, 'FontWeight', 'bold', ...
+    hValvePanel = uipanel(hFig, 'Title', '🎛️ 独立阶跃阀门控制 (历史u 0 - 60（模拟）)', 'FontSize', 12, 'FontWeight', 'bold', ...
         'BackgroundColor', 'white', 'Position', [0.27, 0.70, 0.45, 0.28]);
     uicontrol(hValvePanel, 'Style', 'text', 'String', 'V1 (床左):', 'BackgroundColor', 'white', 'Units', 'normalized', 'Position', [0.02, 0.65, 0.15, 0.2], 'FontSize', 10);
     handles.editV1 = uicontrol(hValvePanel, 'Style', 'edit', 'String', '0', 'Units', 'normalized', 'Position', [0.18, 0.65, 0.1, 0.2], 'FontSize', 11);
@@ -97,20 +100,16 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
     guidata(hFig, handles);
 
     %% ===================== [功能函数] 按钮回调 =====================
-    function val = safeGetNum(hEdit)
-        raw_val = str2double(get(hEdit, 'String'));
-        if isnan(raw_val)
-            val = 0;
-        else
-            val = max(0, min(90, raw_val));
-        end
-    end
-
     function applyValves(hObj, ~)
         handles = guidata(hObj);
-        v1 = safeGetNum(handles.editV1); v2 = safeGetNum(handles.editV2);
-        v4 = safeGetNum(handles.editV4); v5 = safeGetNum(handles.editV5);
-        v7 = safeGetNum(handles.editV7); v8 = safeGetNum(handles.editV8);
+        edits = [handles.editV1,handles.editV2,handles.editV4,handles.editV5,handles.editV7,handles.editV8];
+        try
+            requested = labshared.parseLegacyValveRequest(arrayfun(@(h)get(h,'String'),edits,'UniformOutput',false));
+        catch
+            errordlg('请输入有限实数；请求未更新。历史u单位未核实。','无效阀门请求');
+            return;
+        end
+        v1=requested(1);v2=requested(2);v4=requested(3);v5=requested(4);v7=requested(5);v8=requested(6);
 
         set(handles.editV1, 'String', num2str(v1)); set(handles.editV2, 'String', num2str(v2));
         set(handles.editV4, 'String', num2str(v4)); set(handles.editV5, 'String', num2str(v5));
@@ -136,6 +135,13 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
             return;
         end
         isSimMode = get(handles.chk_SimMode, 'Value');
+try
+    labshared.requireSimulation(isSimMode);
+catch err
+    errordlg(err.message,'真实模式未启用'); return;
+end
+handles.executionMode='simulation'; handles.wallClock=tic;
+set(handles.chk_SimMode,'Enable','off');
 
         handles.time_log = [];
         handles.temp5_log = [];
@@ -164,7 +170,9 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
         header = {'Time(s)', 'T1', 'T2', 'T3', 'T4', 'T5', ...
                   'WC1_Temp', 'WC2_Temp', 'WC3_Temp', ...
                   'WC1', 'WC2', 'WC3', ...
-                  'V1', 'V2', 'V4', 'V5', 'V7', 'V8'};
+                  'V1_u', 'V2_u', 'V4_u', 'V5_u', 'V7_u', 'V8_u', ...
+                  'UTC','Mode','Quality','WriteStatus','CommandUnit','V1_requested','V2_requested','V4_requested','V5_requested','V7_requested','V8_requested', ...
+                  'V1_register_legacy','V2_register_legacy','V4_register_legacy','V5_register_legacy','V7_register_legacy','V8_register_legacy'};
         try
             writecell(header, handles.dataFile);
         catch
@@ -194,11 +202,13 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
             if ~handles.isRunning
                 return;
             end
-            isSimMode = get(handles.chk_SimMode, 'Value');
+            isSimMode = strcmp(handles.executionMode,'simulation');
 
+            u_requested = handles.current_valves;
+            [u_cmd,register_values] = labshared.legacyValveCommand(u_requested);
             T_curr = zeros(5,1);
             if isSimMode
-                u = handles.current_valves;
+                u = u_cmd; % use the exact limited command recorded below
                 T_sim = handles.sim_T_curr;
                 T_sim(1) = T_sim(1) + 0.05*(30.5-T_sim(1)) - 0.005*(u(1)+u(2)) + 0.01*randn;
                 T_sim(2) = T_sim(2) + 0.05*(29.0-T_sim(2)) - 0.008*u(3) + 0.01*randn;
@@ -214,9 +224,9 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
                     end
                 catch
                     if ~isempty(handles.temp5_log)
-                        T_curr = handles.temp5_log(:, end);
+                        T_curr = NaN(5,1); error('lab:ReadFailure','Temperature unavailable; no stale substitution');
                     else
-                        T_curr = [25;25;25;25;25];
+                        T_curr = NaN(5,1); error('lab:ReadFailure','Temperature unavailable; no default substitution');
                     end
                 end
             end
@@ -235,7 +245,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
                 end
             end
 
-            T_wc = zeros(3,1);
+            T_wc = NaN(3,1);
             if ~isSimMode
                 try
                     T_wc(1) = read(handles.wc_modbus, 'holdingregs', 101, 1) / 10;
@@ -243,19 +253,18 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
                     T_wc(3) = read(handles.wc_modbus, 'holdingregs', 103, 1) / 10;
                 catch
                     if ~isempty(handles.wc_temp_log)
-                        T_wc = handles.wc_temp_log(:, end);
+                        T_wc = NaN(3,1); error('lab:ReadFailure','Water temperature unavailable');
                     end
                 end
             else
                 T_wc = [15.7; 15.7; 15.7] + 0.1 * randn(3,1);
             end
 
-            u_cmd = handles.current_valves;
             slave_ids = [1, 2, 4, 5, 7, 8];
             if ~isSimMode
                 for v_idx = 1:6
                     slaveID = slave_ids(v_idx);
-                    dat = round(u_cmd(v_idx) * 100);
+                    dat = register_values(v_idx);
                     dat = max(0, min(6000, dat));
                     try
                         write(handles.valve_modbus, 'holdingregs', 2, dat, slaveID);
@@ -268,7 +277,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
             set(handles.txt_TempInfo, 'String', sprintf('T1(床身): %.2f ℃\nT2(柱左): %.2f ℃\nT3(柱右): %.2f ℃\nT4(梁上): %.2f ℃\nT5(环境): %.2f ℃', T_curr(1), T_curr(2), T_curr(3), T_curr(4), T_curr(5)));
             set(handles.txt_WCInfo, 'String', sprintf('WC1(床身): %d | %.1f℃\nWC2(立柱): %d | %.1f℃\nWC3(横梁): %d | %.1f℃', wc_state(1), T_wc(1), wc_state(2), T_wc(2), wc_state(3), T_wc(3)));
 
-            t_now = length(handles.time_log);
+            t_now = toc(handles.wallClock);
             handles.time_log = [handles.time_log, t_now];
             handles.temp5_log = [handles.temp5_log, T_curr];
             handles.wc3_log = [handles.wc3_log, wc_state];
@@ -277,7 +286,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
 
             row_data = round([t_now, T_curr', T_wc', wc_state', u_cmd'], 2);
             try
-                writematrix(row_data, handles.dataFile, 'WriteMode', 'append');
+                writecell([num2cell(row_data),{labshared.utcNow(),'simulation','SYNTHETIC_DATA','SIMULATED_COMMAND_NOT_SENT','legacy_u_unverified'},num2cell(u_requested'),num2cell(register_values')], handles.dataFile, 'WriteMode', 'append');
             catch
             end
 
@@ -313,6 +322,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
         try
             handles = guidata(hObj);
             handles.isRunning = false;
+            set(handles.chk_SimMode,'Enable','on');
             if ~isempty(handles.sim_timer)
                 stop(handles.sim_timer);
                 delete(handles.sim_timer);
@@ -338,7 +348,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
             end
 
             try clear handles.temp_modbus; clear handles.valve_modbus; clear handles.wc_modbus; catch, end
-            disp('✅ 已安全停止，水泵和阀门已强制关闭，数据已保存。');
+            disp('历史模拟已停止；未向真实设备发送关闭指令。');
             guidata(hObj, handles);
         catch
         end
@@ -346,7 +356,7 @@ function StepResponse_Exp_GUI_WC_Temp_Final()
 
     function timerError(~, ~)
         try handles = guidata(hFig); stopSystem(hFig, []); catch, end
-        errordlg('通讯卡死，已触发硬件安全熔断！', '运行错误');
+        errordlg('模拟运行出错，已请求停止；请检查错误信息。', '运行错误');
     end
 
     function closeApp(hObj, ~)

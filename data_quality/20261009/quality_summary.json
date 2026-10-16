@@ -1,0 +1,10 @@
+{
+  "source_workbook_sha256": "0eeddecd7d21a7a878267d8a0eb23910d18e01d6b282257017cba806317f1ba2",
+  "source_sheet": "热误差建模样本",
+  "original_rows": 22,
+  "excluded_rows": 1,
+  "candidate_rows": 21,
+  "remaining_rows_validated": false,
+  "historical_time_fields": "copied as recorded; actual elapsed time unknown",
+  "measured_calibration_file_modified": false
+}

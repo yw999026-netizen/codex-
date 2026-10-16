@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "workbook_path": "热误差测量/实验数据-澳/龙门机床热误差实验_20261009(10.9上午第一组)_160435.xlsx",
+  "workbook_sha256": "0eeddecd7d21a7a878267d8a0eb23910d18e01d6b282257017cba806317f1ba2",
+  "sheet": "热误差建模样本",
+  "sample_id_column": "样本编号",
+  "exclusions": [
+    {
+      "sample_id": 15,
+      "original_excel_row": 16,
+      "reason_code": "USER_CONFIRMED_INVALID_DATA",
+      "reason": "用户在本对话已确认第15个数据有误；具体错误原因未记录",
+      "confirmation_date": null
+    }
+  ],
+  "other_rows": "candidate_not_fully_validated",
+  "raw_workbook_modified": false
+}

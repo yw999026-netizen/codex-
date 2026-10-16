@@ -1,9 +1,12 @@
-function ADRC_Active_Control_GUI_Dark_Final()
+function ADRC_Active_Control_GUI_WC_Temp()
+% 2026-10-16：历史温控算法模拟演示；真实设备入口已禁用。
+% 开度u为未核实历史数值单位，不能解释为百分比或角度。
+addpath(fileparts(fileparts(fileparts(mfilename('fullpath')))));
 % =====================================================================
 % 五轴机床多温区自抗扰热主动控制系统 (ADRC 暗黑科技实战版 终极封板)
 % 核心更新 1：完美吸收实机成功经验，使用高级 modbus 的第5参数进行点名下发
 % 核心更新 2：彻底阉割抗积分饱和机制，解决离散步长下的高频 Bang-Bang 震荡
-% 物理匹配：球阀动作上限死锁 60°，寄存器地址修正为 2
+% 物理匹配：历史模拟数值上限60，实际单位未核实，寄存器地址修正为 2
 % [2026-06 新增] 水冷机3路实时水箱温度采集（寄存器偏移100/101/102，÷10）
 % =====================================================================
 
@@ -17,7 +20,7 @@ tc_warn = [1.00 0.40 0.40];
 tc_val = [0.00 1.00 0.40]; 
 
 %% ------------------- [1. 主窗口设计] -------------------
-hFig = figure('Name', '自抗扰(ADRC)热主动控制闭环系统 ', ...
+hFig = figure('Name', '历史模拟 · 自抗扰(ADRC)热主动控制闭环系统 ', ...
 'Position', [100, 50, 1350, 750], ... 
 'MenuBar', 'none', 'ToolBar', 'none', ...
 'Color', bg_main, ... 
@@ -66,7 +69,7 @@ handles.txt_TempInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprin
 handles.txt_WCInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('WC1(床): --\nWC2(柱): --\nWC3(梁): --'), ...
 'BackgroundColor', bg_panel, 'ForegroundColor', [0.2 0.8 1], 'FontSize', 11, 'FontWeight', 'bold', 'Units', 'normalized', 'Position', [0.35, 0.1, 0.25, 0.8], 'HorizontalAlignment', 'left');
 
-handles.txt_ValveInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('V1(床左): -- %%\nV2(床右): -- %%\nV4(柱左): -- %%\nV5(柱右): -- %%\nV7(梁上): -- %%\nV8(梁下): -- %%'), ...
+handles.txt_ValveInfo = uicontrol(hMonitorPanel, 'Style', 'text', 'String', sprintf('V1(床左): -- u\nV2(床右): -- u\nV4(柱左): -- u\nV5(柱右): -- u\nV7(梁上): -- u\nV8(梁下): -- u'), ...
 'BackgroundColor', bg_panel, 'ForegroundColor', [0.4 1 0.4], 'FontSize', 11, 'FontWeight', 'bold', 'Units', 'normalized', 'Position', [0.62, 0.1, 0.36, 0.8], 'HorizontalAlignment', 'left');
 
 %% ------------------- [5. 下方：高对比度荧光绘图区] -------------------
@@ -86,7 +89,7 @@ set(lgd1, 'TextColor', tc_norm, 'Color', bg_panel, 'EdgeColor', bg_main);
 
 handles.axValve = axes('Parent', hFig, 'Position', [0.05, 0.08, 0.92, 0.24]);
 xlabel('控制进行时间 (秒)', 'FontWeight', 'bold', 'Color', tc_norm); 
-ylabel('ADRC 动态开度 (%)', 'FontWeight', 'bold', 'Color', tc_norm); 
+ylabel('ADRC 动态指令u（单位未核实）', 'FontWeight', 'bold', 'Color', tc_norm);
 set(handles.axValve, 'Color', bg_edit, 'XColor', tc_norm, 'YColor', tc_norm, 'GridColor', [0.3 0.3 0.4], 'GridAlpha', 0.5);
 
 grid(handles.axValve, 'on'); hold(handles.axValve, 'on'); ylim(handles.axValve, [-5 65]); 
@@ -108,6 +111,13 @@ function startSystem(hObj, ~)
 handles = guidata(hObj);
 if handles.isRunning; return; end 
 isSimMode = get(handles.chk_SimMode, 'Value');
+try
+    labshared.requireSimulation(isSimMode);
+catch err
+    errordlg(err.message,'真实模式未启用'); return;
+end
+handles.executionMode='simulation'; handles.wallClock=tic;
+set(handles.chk_SimMode,'Enable','off');
 
 handles.time_log = []; handles.temp5_log = []; handles.valve6_log = []; handles.wc3_log = [];
 handles.wc_temp_log = [];   % ★【新增】重置水冷温度记录
@@ -141,7 +151,9 @@ handles.dataFile = ['ADRC_Control_Data_' datestr(now, 'mmdd_HHMM') '.xlsx'];
 header = {'Time(s)', 'T1_Bed', 'T2_Col_L', 'T3_Col_R', 'T4_Beam', 'T5_Env', ...
           'WC1_Temp', 'WC2_Temp', 'WC3_Temp', ...
           'WC1_On', 'WC2_On', 'WC3_On', ...
-          'V1', 'V2', 'V4', 'V5', 'V7', 'V8'};
+          'V1_u', 'V2_u', 'V4_u', 'V5_u', 'V7_u', 'V8_u', ...
+                  'UTC','Mode','Quality','WriteStatus','CommandUnit','V1_requested','V2_requested','V4_requested','V5_requested','V7_requested','V8_requested', ...
+                  'V1_register_legacy','V2_register_legacy','V4_register_legacy','V5_register_legacy','V7_register_legacy','V8_register_legacy'};
 try writecell(header, handles.dataFile); catch; end
 
 handles.isRunning = true;
@@ -160,7 +172,7 @@ try
 if ~ishandle(hFig); return; end 
 handles = guidata(hFig);
 if ~handles.isRunning; return; end 
-isSimMode = get(handles.chk_SimMode, 'Value');
+isSimMode = strcmp(handles.executionMode,'simulation');
 
 T_target_val = str2double(get(handles.editTargetT, 'String'));
 if isnan(T_target_val); T_target_val = 20.0; end
@@ -184,7 +196,7 @@ else
 try
 for i = 1:5; T_curr(i) = read(handles.temp_modbus, 'holdingregs', 1536+i, 1) / 10; end
 catch
-if ~isempty(handles.temp5_log); T_curr = handles.temp5_log(:, end); else; T_curr = [25;25;25;25;25]; end
+T_curr=NaN(5,1); error('lab:ReadFailure','Temperature read failed; no default or stale substitution');
 end
 end
 
@@ -196,6 +208,8 @@ u_cmd = zeros(6, 1);
 [u_cmd(4), handles.adrc(4)] = discrete_ADRC(T_target_val, T_curr(3), handles.adrc(4)); 
 [u_cmd(5), handles.adrc(5)] = discrete_ADRC(T_target_val, T_curr(4), handles.adrc(5)); 
 [u_cmd(6), handles.adrc(6)] = discrete_ADRC(T_target_val, T_curr(4), handles.adrc(6)); 
+
+u_requested=u_cmd; [u_cmd,register_values]=labshared.legacyValveCommand(u_requested);
 
 %% --- 水冷机启停回差保护逻辑 ---
 wc1 = double(T_curr(1) > 20); wc2 = double(T_curr(2) > 20 || T_curr(3) > 20); wc3 = double(T_curr(4) > 20);
@@ -215,7 +229,7 @@ end
 %% --- ★【新增】读取3台水冷机实时水箱温度 ---
 % 寄存器地址表（3Ji-Yi-Ti.xlsx）：偏移100=水箱温度1，101=水箱温度2，102=水箱温度3
 % 读出原始值需 ÷10 得到真实温度（例如读到156 → 15.6℃）
-T_wc = zeros(3, 1);
+T_wc = NaN(3, 1);
 if ~isSimMode
     try
         T_wc(1) = read(handles.wc_modbus, 'holdingregs', 101, 1) / 10;
@@ -224,7 +238,7 @@ if ~isSimMode
     catch
         % 读取失败时保持上一时刻值，避免数据断档
         if ~isempty(handles.wc_temp_log)
-            T_wc = handles.wc_temp_log(:, end);
+            T_wc = NaN(3,1); error('lab:ReadFailure','Water temperature unavailable');
         end
     end
 else
@@ -237,7 +251,7 @@ slave_ids = [1, 2, 4, 5, 7, 8]; % 对应 V1, V2, V4, V5, V7, V8
 if ~isSimMode
 for v_idx = 1:6
 slaveID = slave_ids(v_idx);
-dat = round(u_cmd(v_idx) * 100);
+dat = register_values(v_idx);
 dat = max(0, min(6000, dat));
 try
 write(handles.valve_modbus, 'holdingregs', 2, dat, slaveID);
@@ -248,7 +262,7 @@ end
 end
 
 %% --- 数据归档（时间、机床温度、水冷温度、水冷开关、球阀开度）---
-t_now = length(handles.time_log);
+t_now = toc(handles.wallClock);
 handles.time_log     = [handles.time_log, t_now];
 handles.temp5_log    = [handles.temp5_log, T_curr];
 handles.valve6_log   = [handles.valve6_log, u_cmd];
@@ -259,11 +273,11 @@ handles.wc_temp_log  = [handles.wc_temp_log, T_wc];  % ★【新增】
 set(handles.txt_TempInfo, 'String', sprintf('T1(床身): %.2f ℃\nT2(柱左): %.2f ℃\nT3(柱右): %.2f ℃\nT4(梁上): %.2f ℃\nT5(环境): %.2f ℃', T_curr(1), T_curr(2), T_curr(3), T_curr(4), T_curr(5)));
 % ★【新增】界面也显示水冷实时温度而不只是开关状态
 set(handles.txt_WCInfo, 'String', sprintf('WC1(床): %d | %.1f℃\nWC2(柱): %d | %.1f℃\nWC3(梁): %d | %.1f℃', wc_state(1), T_wc(1), wc_state(2), T_wc(2), wc_state(3), T_wc(3)));
-set(handles.txt_ValveInfo, 'String', sprintf('V1(床左): %04.1f %%\nV2(床右): %04.1f %%\nV4(柱左): %04.1f %%\nV5(柱右): %04.1f %%\nV7(梁上): %04.1f %%\nV8(梁下): %04.1f %%', u_cmd(1), u_cmd(2), u_cmd(3), u_cmd(4), u_cmd(5), u_cmd(6)));
+set(handles.txt_ValveInfo, 'String', sprintf('V1(床左): %04.1f u\nV2(床右): %04.1f u\nV4(柱左): %04.1f u\nV5(柱右): %04.1f u\nV7(梁上): %04.1f u\nV8(梁下): %04.1f u', u_cmd(1), u_cmd(2), u_cmd(3), u_cmd(4), u_cmd(5), u_cmd(6)));
 
 %% --- Excel 写入（★列顺序：时间|T1-T5|WC1-WC3温度|WC1-WC3开关|V1-V8）---
 row_data = round([t_now, T_curr', T_wc', wc_state', u_cmd'], 2);
-try writematrix(row_data, handles.dataFile, 'WriteMode', 'append'); catch; end
+try writecell([num2cell(row_data),{labshared.utcNow(),'simulation','SYNTHETIC_DATA','SIMULATED_COMMAND_NOT_SENT','legacy_u_unverified'},num2cell(u_requested'),num2cell(register_values')], handles.dataFile, 'WriteMode', 'append'); catch; end
 
 %% --- 绘图更新 ---
 set(handles.lineT1, 'XData', handles.time_log, 'YData', handles.temp5_log(1,:));
@@ -312,6 +326,7 @@ end
 function stopSystem(hObj, ~)
 try
 handles = guidata(hObj); handles.isRunning = false;
+            set(handles.chk_SimMode,'Enable','on');
 if ~isempty(handles.sim_timer); stop(handles.sim_timer); delete(handles.sim_timer); handles.sim_timer = []; end
 try write(handles.wc_modbus, 'holdingregs', 1, 0); catch; end
 try write(handles.wc_modbus, 'holdingregs', 2, 0); catch; end
@@ -330,7 +345,7 @@ catch; end
 
 try clear handles.temp_modbus; clear handles.valve_modbus; clear handles.wc_modbus; catch; end
 
-set(handles.txt_SysStatus, 'String', '▶ 系统状态：已安全停机，阀门全关', 'ForegroundColor', [1.0 0.4 0.4]);
+set(handles.txt_SysStatus, 'String', '▶ 系统状态：历史模拟已停止；未向真实设备发送关闭指令', 'ForegroundColor', [1.0 0.4 0.4]);
 
 guidata(hObj, handles);
 catch

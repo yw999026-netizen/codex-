@@ -1,8 +1,11 @@
+% 历史17路配置参考，未被当前18路入口使用；不得作为真实设备表。
 % 系统配置文件
 % 根据实际硬件情况修改以下参数
 
 classdef SystemConfig
     properties (Constant)
+        HARDWARE_ENABLED = false;
+        STATUS = 'historical_unverified';
         % 串口设置
         SERIAL_PORT = 'COM4';
         BAUD_RATE = 9600;
