@@ -1,0 +1,2 @@
+﻿case,file,sheet,excel_row,sample_id,axis,stored_um,recalculated_um,stored_minus_recalculated_um,status
+XYZ,XYZ联动.xlsx,热误差建模样本,8,7,Y,100.031799010992,70.03179901099274,29.99999999999926,用户确认无人为加值；原值与矩阵复算不一致，原因待追溯；不覆盖原文件
