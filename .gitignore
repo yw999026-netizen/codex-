@@ -15,3 +15,7 @@ outputs/
 # 系统临时文件
 Thumbs.db
 .DS_Store
+
+# 本地执行工作区与编辑器锁文件（已有历史资料保留）
+/work/
+~$*
